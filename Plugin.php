@@ -2,11 +2,11 @@
 /**
  * 外链跳转提示工具 Pro
  * 
- * 智能识别子域名，支持自定义跳转页模板（HTML/CSS），保护用户安全。
+ * 智能识别子域名，自动清洗白名单格式，支持自定义跳转页模板。
  * 
  * @package ExternalLink
  * @author huntuo146
- * @version 2.0.0
+ * @version 2.1.0
  * @link https://github.com/huntuo146/typecho_ExternalLink
  */
 
@@ -29,7 +29,7 @@ class Plugin implements PluginInterface
     {
         Helper::addRoute('external_link_jump', '/go', 'TypechoPlugin\ExternalLink\Action', 'render');
         \Typecho\Plugin::factory('Widget_Archive')->footer = __CLASS__ . '::footer';
-        return _t('插件已激活，请前往设置配置白名单');
+        return _t('插件已激活，白名单逻辑已增强');
     }
 
     public static function deactivate()
@@ -45,7 +45,7 @@ class Plugin implements PluginInterface
             null, 
             "github.com\ncloudflare.com\nbaidu.com", 
             _t('域名白名单（根域名）'), 
-            _t('每行一个。只需输入根域名（如 github.com），该域名的所有子域名（如 api.github.com）和所有页面均会自动放行。')
+            _t('每行一个。只需输入根域名（如 github.com），该域名及其所有子域名（如 api.github.com）均会自动放行。<br>会自动忽略 http:// 前缀和空格。')
         );
         $form->addInput($whitelist);
 
@@ -75,11 +75,11 @@ class Plugin implements PluginInterface
             null, 
             self::getExampleTemplate(), 
             _t('自定义 HTML 代码'), 
-            _t('仅在模式选择“自定义”时生效。<br>可用变量：<br><b>{url}</b> : 目标链接地址<br><b>{title}</b> : 页面标题<br><b>{intro}</b> : 提示语')
+            _t('可用变量：<br><b>{url}</b> : 目标链接<br><b>{title}</b> : 标题<br><b>{intro}</b> : 提示语')
         );
         $form->addInput($customHtml);
         
-        // 5. 默认模板的提示语 (仅默认模板有效)
+        // 5. 默认模板提示语
         $alertText = new Textarea(
             'alertText', 
             null, 
@@ -97,36 +97,65 @@ class Plugin implements PluginInterface
         $options = \Typecho\Widget::widget('Widget_Options');
         $pluginOpts = $options->plugin('ExternalLink');
         
-        // 处理白名单
+        // --- 核心修复：PHP端强力清洗白名单数据 ---
         $whitelistStr = $pluginOpts->whitelist ?? '';
-        $whitelistArr = array_filter(explode("\r\n", $whitelistStr));
+        
+        // 1. 按换行符分割
+        $rawList = preg_split("/[\r\n]+/", $whitelistStr);
+        
+        $cleanList = [];
+        foreach ($rawList as $domain) {
+            $domain = trim($domain); // 去除首尾空格
+            if (empty($domain)) continue;
+
+            // 2. 移除 http:// 或 https:// 前缀
+            $domain = preg_replace('#^https?://#i', '', $domain);
+            
+            // 3. 移除路径部分（如 github.com/user -> github.com）
+            $parts = explode('/', $domain);
+            $domain = $parts[0];
+
+            // 4. 转小写
+            $cleanList[] = strtolower($domain);
+        }
+
         // 自动加入本站域名
-        $whitelistArr[] = parse_url($options->siteUrl, PHP_URL_HOST);
-        // 去除空行和空格
-        $whitelistArr = array_map('trim', $whitelistArr);
-        $jsonWhitelist = json_encode(array_values($whitelistArr));
+        $currentHost = strtolower(parse_url($options->siteUrl, PHP_URL_HOST));
+        if ($currentHost && !in_array($currentHost, $cleanList)) {
+            $cleanList[] = $currentHost;
+        }
+        
+        $jsonWhitelist = json_encode(array_values(array_unique($cleanList)));
 
         echo <<<SCRIPT
 <script>
 (function(){
     var whitelist = {$jsonWhitelist};
     var links = document.querySelectorAll('a');
-    var currentHost = window.location.hostname;
+    var currentHost = window.location.hostname.toLowerCase();
     
-    // 获取域名
+    // 获取标准化的域名
     function getDomain(url) {
-        try { return new URL(url).hostname; } catch(e) { return ''; }
+        try { 
+            var u = new URL(url);
+            // 排除 mailto, tel 等非http协议
+            if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+            return u.hostname.toLowerCase(); 
+        } catch(e) { return null; }
     }
 
-    // 智能匹配：支持根域名匹配 (例如 whitelist 包含 github.com，则 api.github.com 也返回 true)
+    // --- 核心修复：JS端严格匹配逻辑 ---
     function isWhitelisted(domain) {
         if (!domain) return false;
+        
         for(var i=0; i<whitelist.length; i++) {
-            var w = whitelist[i];
-            if (!w) continue;
-            // 1. 完全相等
+            var w = whitelist[i]; // 已经是小写且去除了空格
+            
+            // 1. 完全相等 (例如 github.com === github.com)
             if (domain === w) return true;
-            // 2. 是子域名 (domain 以 .w 结尾)
+            
+            // 2. 子域名匹配 (例如 api.github.com 匹配 .github.com)
+            // 必须加上点号，防止 my-github.com 匹配到 github.com
             if (domain.endsWith('.' + w)) return true;
         }
         return false;
@@ -134,46 +163,13 @@ class Plugin implements PluginInterface
 
     links.forEach(function(link) {
         var href = link.href;
+        // 基础过滤
         if (!href || href.indexOf('javascript:') === 0 || href.indexOf('#') === 0) return;
         
         var targetDomain = getDomain(href);
         
-        // 逻辑：如果是有效域名 AND 不是当前域名 AND 不在白名单
-        if (targetDomain && targetDomain !== currentHost && !isWhitelisted(targetDomain)) {
-            var encodedUrl = btoa(encodeURIComponent(href));
-            link.href = '{$options->siteUrl}go?url=' + encodedUrl;
-            link.target = '_blank';
-            link.rel = 'noopener noreferrer nofollow';
-        }
-    });
-})();
-</script>
-SCRIPT;
-    }
-
-    // 提供一个自定义模板的初始示例
-    private static function getExampleTemplate() {
-        return <<<HTML
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>{title}</title>
-    <style>
-        body{background:#f0f2f5;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}
-        .box{background:#fff;padding:40px;border-radius:10px;text-align:center;box-shadow:0 10px 25px rgba(0,0,0,0.1);}
-        .btn{background:#007bff;color:#fff;text-decoration:none;padding:10px 30px;border-radius:5px;display:inline-block;margin-top:20px;}
-    </style>
-</head>
-<body>
-    <div class="box">
-        <h2>安全性提示</h2>
-        <p>{intro}</p>
-        <p style="color:#888;font-size:12px;">目标：{url}</p>
-        <a href="{url}" rel="nofollow" class="btn">继续访问</a>
-    </div>
-</body>
-</html>
-HTML;
-    }
-}
+        // 如果无法获取域名（可能是相对路径或非http协议），直接忽略，视为内链
+        if (!targetDomain) return;
+        
+        // 如果是外链 且 不在白名单
+        if (t
