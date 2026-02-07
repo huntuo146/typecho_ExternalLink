@@ -5,9 +5,9 @@
  * 智能识别子域名，支持自定义跳转页模板（HTML/CSS），保护用户安全。
  * 
  * @package ExternalLink
- * @author huotuo146
+ * @author huntuo146
  * @version 2.0.0
- * @link https://typecho.org
+ * @link https://github.com/huntuo146/typecho_ExternalLink
  */
 
 namespace TypechoPlugin\ExternalLink;
